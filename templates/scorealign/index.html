@@ -1,0 +1,192 @@
+<!doctype html>
+<html>
+
+<head>
+<title>Automatic Offline Score Following</title>
+<script src="{{ STATIC_URL }}jquery.min.js"></script>
+<script src="{{ STATIC_URL }}raphael.js"></script>
+<script src="{{ STATIC_URL }}soundmanager2.js"></script>
+<script>
+soundManager.setup({
+  url: "{{ STATIC_URL}}",
+  preferFlash: false,
+  flashVersion: 9, // optional: shiny features (default = 8)
+  debugMode: false,
+  onready: function() {
+    // Ready to use; soundManager.createSound() etc. can now be called.
+  }
+});
+      var sound;
+$(function() {
+        var paper = Raphael(document.getElementById("score"), '100%', 500);
+        var cursor;
+        var xscale = 300;
+        var interval_ptr;
+        var last_name;
+        var last_alignment;
+        
+        var drawScore = function(data) {
+                paper.clear()
+                score_width = $('#score').width()
+                                
+                note_height = 500 / (data.note_range[1] - data.note_range[0] + 1)
+                note_offset = data.note_range[1]
+                measure_offset = data.events[1].start*xscale
+                
+                for (i=0; i <= Math.ceil(data.duration); i += 1) {
+                        var p = paper.path('M'+(i*xscale+measure_offset)+',0L'+(i*xscale+measure_offset)+',500')
+                        p.attr('stroke', '#ddd')
+                }
+                
+                $.each(data.events, function(key, event) {
+                    $.each(event.notes, function(key, note) {
+                        y = (note_offset - note) * note_height
+                        var box = paper.rect(event.start*xscale, y, event.duration*xscale, note_height)
+                        box.attr({'fill': '#999', 'stroke': 'none'})
+                    });
+                });
+
+                cursor = paper.path('M0,0L0,500')
+                cursor.attr({'stroke-width': '5px', 'stroke': '#00F'})
+                paper.setViewBox(0, 0, score_width, 500, true)
+        }
+        
+        var move_cursor = function(offset) {
+            var x = xscale * offset;
+            cursor.attr('path', 'M'+x+',0L'+x+',500')
+            
+            var width = $('#score').width()
+            if (x > width / 2) {
+                paper.setViewBox(x - width / 2, 0, width, 500, true)
+            }
+	    else {
+                paper.setViewBox(0, 0, width, 500, true)
+            }
+        }
+
+        var playAlignment = function(name, alignment) {
+	        soundManager.reboot();
+            window.clearInterval(interval_ptr)
+    		window.setTimeout(function() {
+                url = "/scorealign/audio/" + name + '.wav'
+                sound = soundManager.createSound({
+                  id: 'mySound',
+                  url: url,
+                  autoLoad: true,
+                  autoPlay: false,
+                  debugMode: false,
+                  html5PollingInterval: 50,
+                  flashPollingInterval: 50,
+                  useFastPolling: true,
+                  useHighPerformance: true,
+                  volume: 100
+                });
+                var progress = 0;
+                var alignment_pos = 0;
+                var playing = true;
+                
+                var update_position = function() {
+                    var above = 0;
+                    if (alignment_pos < alignment.audio.length - 2 && progress > alignment.audio[alignment_pos+1]) {
+		                alignment_pos += 1;
+	                }
+                    above = alignment.audio[alignment_pos+1];
+                    below = alignment.audio[alignment_pos];
+                    above_score = alignment.score[alignment_pos + 1];
+                    below_score = alignment.score[alignment_pos];
+                    var position = (progress - below) / (above - below) * (above_score - below_score) + below_score;
+                    if (position > alignment.duration) {
+                        position = alignment.duration;
+                        sound.stop();
+                    }
+                    move_cursor(position);
+                }
+                
+                sound.play({
+                    whileplaying: function(d) {
+                       progress = sound.position / 1000;
+                        update_position();
+                    },
+                    onfinish: function() {
+                        playing = false;
+				        soundManager.reboot();
+                    }
+                });
+                
+                var timeout_func = function() {
+                    if (progress > 0) {
+                        progress += 50 / 1000;
+                        update_position();
+                    }
+                    if (!playing || alignment_pos >= alignment.audio.length - 1) window.clearInterval(interval_ptr);
+                };
+                interval_ptr = window.setInterval(timeout_func, 50);
+            }, 200);
+        }
+
+        $('#selectform').submit(function(e) {
+            soundManager.reboot();
+            e.preventDefault();
+		    var name = $('#scorename').val()
+		    var likelihood = $('#likelihood').val()
+		    var path = $('#path').val()
+		    $.getJSON("/scorealign/scoredata/" + name + ".json", function(data) {
+		        drawScore(data)
+		
+		        $.getJSON("/scorealign/align/" + likelihood + '/' + path + '/' + name + ".json", function(alignment) {                
+                    last_name = name;
+                    last_alignment = alignment;
+		            playAlignment(name, alignment)
+		       });
+	       });
+	});
+    $('button.replay').click(function(e) {
+        e.preventDefault();
+        playAlignment(last_name, last_alignment)
+    });
+});
+</script>
+<style>
+#score {
+        border:2px solid #aaa;
+}
+</style>
+</head>
+
+<body>
+        <h1>Automatic Offline Score Following</h1>
+        <p>Select a piece of music, the likelihood method and the path-finding method from the drop-down boxes below, then
+        click 'align' to play the alignment. This has only been tested in Chrome, but it should work in all modern browsers.</p>
+        <form action="/scorealign/" method="post" id="selectform">
+        {% csrf_token %}
+                <select id="scorename">
+                {% for file in files %}
+                <option name="{{ file }}">{{ file }}</option>
+                {% endfor %}
+                </select>
+                <select id="likelihood">
+                    <option value="poisson">Poisson point model</option>
+                    <option value="spectra" selected>Chromagram</option>
+                    <option value="psd">Power spectral density</option>
+                </select>
+                <select id="path">
+                    <option value="dtw">Dynamic Time Warping</option>
+                    <option value="hmm">Hidden Markov Model</option>
+                    <option value="hsmm" selected>Hidden Semi-Markov Model</option>
+                </select>
+                <button class="align">Align</button>
+                <button class="replay" type="button">Replay</button>
+        </form>
+        <div id="labels"></div>
+        <div id="score"></div>
+	<script>
+	  (function(i,s,o,g,r,a,m){i['GoogleAnalyticsObject']=r;i[r]=i[r]||function(){
+	    (i[r].q=i[r].q||[]).push(arguments)},i[r].l=1*new Date();a=s.createElement(o),
+	      m=s.getElementsByTagName(o)[0];a.async=1;a.src=g;m.parentNode.insertBefore(a,m)
+	        })(window,document,'script','//www.google-analytics.com/analytics.js','ga');
+
+	ga('create', 'UA-41257871-1', 'srcf.net');
+	    ga('send', 'pageview');
+	    </script>
+</body>
+</html>
